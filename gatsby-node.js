@@ -1,14 +1,49 @@
 const Promise = require('bluebird');
 const ContentAPI = require('./content-api');
-const {PostNode, PageNode, TagNode, AuthorNode, SettingsNode, fakeNodes} = require('./ghost-nodes');
+
+const { PostNode, PageNode, TagNode, AuthorNode, SettingsNode, fakeNodes } = require('./ghost-nodes');
+const { createRemoteFileNode } = require('gatsby-source-filesystem');
 
 /**
  * Create Live Ghost Nodes
  * Uses the Ghost Content API to fetch all posts, pages, tags, authors and settings
  * Creates nodes for each record, so that they are all available to Gatsby
  */
-const createLiveGhostNodes = ({actions}, configOptions) => {
-    const {createNode} = actions;
+const createLiveGhostNodes = async ({ actions, createNodeId, store, cache }, configOptions) => {
+    const { createNode, createNodeField } = actions;
+    let pages, posts;
+
+    const downloadImageAndCreateFileNode = async ({ feature_image, id }, { createNode, createNodeId, store, cache }) => {
+        let fileNode;
+    
+        try {
+            fileNode = await createRemoteFileNode({
+                url: feature_image,
+                parentNodeId: id,
+                store,
+                cache,
+                createNode,
+                createNodeId,
+                name: 'image'
+            });
+
+            await createNodeField({
+                node: fileNode,
+                name: 'originalPath',
+                value: feature_image,
+            });
+
+            await createNodeField({
+                node: fileNode,
+                name: 'refId',
+                value: id,
+            });
+        } catch (err) {
+            console.warn('Error creating node', err);
+        }
+    
+        return fileNode;
+    };
 
     const api = ContentAPI.configure(configOptions);
 
@@ -18,12 +53,12 @@ const createLiveGhostNodes = ({actions}, configOptions) => {
         formats: 'html,plaintext'
     };
 
-    const fetchPosts = api.posts.browse(postAndPageFetchOptions).then((posts) => {
-        posts.forEach(post => createNode(PostNode(post)));
+    const fetchPosts = api.posts.browse(postAndPageFetchOptions).then((ghostPosts) => {
+        posts = ghostPosts;
     });
 
-    const fetchPages = api.pages.browse(postAndPageFetchOptions).then((pages) => {
-        pages.forEach(page => createNode(PageNode(page)));
+    const fetchPages = api.pages.browse(postAndPageFetchOptions).then((ghostPages) => {
+        pages = ghostPages;
     });
 
     const tagAndAuthorFetchOptions = {
@@ -51,7 +86,29 @@ const createLiveGhostNodes = ({actions}, configOptions) => {
         createNode(SettingsNode(setting));
     });
 
-    return Promise.all([fetchPosts, fetchPages, fetchTags, fetchAuthors, fetchSettings]);
+    return await Promise.all([fetchPosts, fetchPages, fetchTags, fetchAuthors, fetchSettings])
+        .then(async () => {
+            await Promise.all(
+                posts.map(async (post) => {
+                    if (post.feature_image) {
+                        post.image = await downloadImageAndCreateFileNode(post, { createNode, createNodeId, store, cache });
+            
+                        post.localFile___NODE = post.image.id;
+                    }
+            
+                    return createNode(PostNode(post));
+                }),
+                pages.map(async (page) => {
+                    if (page.feature_image) {
+                        page.image = await downloadImageAndCreateFileNode(page, { createNode, createNodeId, store, cache });
+
+                        page.localFile___NODE = page.image.id;
+                    }
+            
+                    return createNode(PageNode(page));
+                })
+            );
+        });
 };
 
 /**
@@ -81,15 +138,17 @@ const createTemporaryFakeNodes = ({emitter, actions}) => {
 };
 
 // Standard way to create nodes
-exports.sourceNodes = ({emitter, actions}, configOptions) => {
+exports.sourceNodes = async ({emitter, actions, createNodeId, store, cache}, configOptions) => {
     // These temporary nodes ensure that Gatsby knows about every field in the Ghost Schema
-    createTemporaryFakeNodes({emitter, actions});
+    createTemporaryFakeNodes({emitter, actions, store, cache});
 
     // Go and fetch live data, and populate the nodes
-    return createLiveGhostNodes({actions}, configOptions);
+    const nodes = createLiveGhostNodes({actions, createNodeId, store, cache}, configOptions);
+
+    return nodes;
 };
 
 // Secondary point in build where we have to create fake Nodes
-exports.onPreExtractQueries = ({emitter, actions}) => {
-    createTemporaryFakeNodes({emitter, actions});
+exports.onPreExtractQueries = ({emitter, actions, store, cache}) => {
+    createTemporaryFakeNodes({emitter, actions, store, cache});
 };
